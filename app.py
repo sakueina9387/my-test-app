@@ -12,12 +12,17 @@ if "weaknesses" not in st.session_state: st.session_state.weaknesses = []
 if "subjects" not in st.session_state: st.session_state.subjects = ["デフォルト科目"]
 
 # --- ライブラリのバグを100%回避してGoogleサーバーと直接通信する関数 ---
-def call_gemini_api(api_key, prompt, uploaded_file=None, is_multiple=False):
-    # 【ここを修正】最新のキー(AQ...)に対応したURLの書き方に変更しました
+def call_gemini_api(prompt, uploaded_file=None, is_multiple=False):
+    # 【変更】Streamlit CloudのSecrets（隠し金庫）からキーを自動取得します
+    if "GEMINI_API_KEY" not in st.secrets:
+        st.error("Streamlitの管理画面（Secrets）に APIキーが設定されていません。")
+        st.stop()
+        
+    api_key = st.secrets["GEMINI_API_KEY"]
     url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
     headers = {
         "Content-Type": "application/json",
-        "x-goog-api-key": api_key  # キーをここに安全に乗せる形式にします
+        "x-goog-api-key": api_key
     }
     
     contents = []
@@ -44,12 +49,9 @@ def call_gemini_api(api_key, prompt, uploaded_file=None, is_multiple=False):
 # --- メインのUI構築 ---
 st.set_page_config(page_title="AI大学テスト対策", layout="wide")
 
-# ⚙️ 左サイドバー
+# ⚙️ 左サイドバー（APIキー入力欄を消去し、スッキリさせました）
 st.sidebar.header("⚙️ 設定・科目管理")
-st.sidebar.subheader("🔑 API設定")
-api_key = st.sidebar.text_input("Gemini APIキーを入力", type="password")
 
-st.sidebar.divider()
 st.sidebar.subheader("👤 ユーザー設定")
 current_user = st.sidebar.text_input("ユーザー名を入力", value="user1")
 
@@ -62,11 +64,6 @@ if st.sidebar.button("科目を追加登録"):
 
 st.sidebar.subheader("📂 現在の対象科目")
 selected_subject = st.sidebar.selectbox("科目を選択してください", st.session_state.subjects)
-
-# APIキーが入力されていない場合は案内を出す
-if not api_key:
-    st.info("左側のメニューにGemini APIキー（コピーした文字列）を入力してください。")
-    st.stop()
 
 # 📂 メイン画面の表示
 st.title(f"📚 {selected_subject} の学習ダッシュボード")
@@ -87,7 +84,7 @@ with tab1:
             with st.spinner("Geminiが分析して類題を作成中..."):
                 try:
                     prompt = f"以下の画像を分析し、類似した問題を{num_q}問作成してください。必ず各問題の先頭に「【問題】」という文字をつけてください。解答や解説は含めず、問題文のみを出力してください。"
-                    res_text = call_gemini_api(api_key, prompt, uploaded_imgs, is_multiple=True)
+                    res_text = call_gemini_api(prompt, uploaded_imgs, is_multiple=True)
                     
                     for block in res_text.split("【問題】"):
                         if block.strip():
@@ -122,7 +119,7 @@ with tab2:
             with st.spinner("重要なキーワードと公式を抽出中..."):
                 try:
                     prompt = "画像に含まれる重要な公式や英単語、専門用語を抽出し、暗記カード形式で出力してください。「【用語/公式】: その説明や意味」という形式で1行ずつ箇条書きにしてください。"
-                    res_text = call_gemini_api(api_key, prompt, flash_imgs, is_multiple=True)
+                    res_text = call_gemini_api(prompt, flash_imgs, is_multiple=True)
                     cards = [line.strip() for line in res_text.split('\n') if line.strip() and "】" in line]
                     st.session_state.flashcards.extend(cards if cards else [res_text])
                     st.success("暗記カードを作成しました！")
@@ -161,7 +158,7 @@ with tab4:
             with st.spinner("採点中..."):
                 try:
                     prompt = "この画像の答案を採点し、100点満点で点数をつけてください。また、どこが間違っているか、どう直せばよいかの解説を丁寧に記述してください。"
-                    res = call_gemini_api(api_key, prompt, ans_img, is_multiple=False)
+                    res = call_gemini_api(prompt, ans_img, is_multiple=False)
                     st.success("採点が完了しました！")
                     st.write(res)
                 except Exception as e:
@@ -180,7 +177,7 @@ with tab5:
                 with st.spinner("専用の特化問題を生成中..."):
                     try:
                         prompt = f"ユーザーの現在の弱点分野は「{', '.join(target)}」です。この弱点をピンポイントで克服するための特化型問題を1問作成し、その後に詳しい解説を記述してください。"
-                        w_q = call_gemini_api(api_key, prompt)
+                        w_q = call_gemini_api(prompt)
                         st.success("生成完了！")
                         st.write(w_q)
                     except Exception as e:
