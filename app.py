@@ -9,10 +9,10 @@ import base64
 if "questions" not in st.session_state: st.session_state.questions = []
 if "flashcards" not in st.session_state: st.session_state.flashcards = []
 if "weaknesses" not in st.session_state: st.session_state.weaknesses = []
+if "subjects" not in st.session_state: st.session_state.subjects = ["デフォルト科目"]
 
 # --- ライブラリのバグを100%回避してGoogleサーバーと直接通信する関数 ---
 def call_gemini_api(api_key, prompt, uploaded_file=None, is_multiple=False):
-    # 最新モデルへの直通ルート
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
     
@@ -39,17 +39,35 @@ def call_gemini_api(api_key, prompt, uploaded_file=None, is_multiple=False):
 
 # --- メインのUI構築 ---
 st.set_page_config(page_title="AI大学テスト対策", layout="wide")
-st.title("📚 スマホ対応・大学テスト対策AIアプリ")
 
-# 左サイドバー: APIキー設定
-st.sidebar.header("⚙️ 設定")
+# ⚙️ 左サイドバー（すべての機能を復活させました！）
+st.sidebar.header("⚙️ 設定・科目管理")
+st.sidebar.subheader("🔑 API設定")
 api_key = st.sidebar.text_input("Gemini APIキーを入力", type="password")
 
+st.sidebar.divider()
+st.sidebar.subheader("👤 ユーザー設定")
+current_user = st.sidebar.text_input("ユーザー名を入力", value="user1")
+
+st.sidebar.subheader("➕ 新しく科目を増やす")
+new_subject = st.sidebar.text_input("科目の名前を入力")
+if st.sidebar.button("科目を追加登録"):
+    if new_subject and new_subject not in st.session_state.subjects:
+        st.session_state.subjects.append(new_subject)
+        st.sidebar.success(f"「{new_subject}」を追加しました！")
+
+st.sidebar.subheader("📂 現在の対象科目")
+selected_subject = st.sidebar.selectbox("科目を選択してください", st.session_state.subjects)
+
+# APIキーが入力されていない場合は案内を出す
 if not api_key:
-    st.info("左側のメニューにGemini APIキー（AIzaSy...から始まるもの）を入力してください。")
+    st.info("左側のメニューにGemini APIキー（コピーした文字列）を入力してください。")
     st.stop()
 
-# タブの作成（全5機能）
+# 📂 メイン画面の表示
+st.title(f"📚 {selected_subject} の学習ダッシュボード")
+
+# タブの作成
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🔥 過去問から類題", "📇 公式暗記カード", "⏱️ ミニ模試", "📝 答案を採点", "❌ 弱点克服モード"
 ])
