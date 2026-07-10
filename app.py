@@ -1,52 +1,43 @@
 import streamlit as st
+import google.generativeai as genai
 import json
 import os
 import random
-import requests
-import base64
+from PIL import Image
 
-# --- 設定・データ管理 (クラウド上でも動くようにセッションで簡易管理) ---
+# --- 設定・データ管理 ---
 if "questions" not in st.session_state: st.session_state.questions = []
 if "flashcards" not in st.session_state: st.session_state.flashcards = []
 if "weaknesses" not in st.session_state: st.session_state.weaknesses = []
 if "subjects" not in st.session_state: st.session_state.subjects = ["デフォルト科目"]
 
-# --- ライブラリのバグを100%回避してGoogleサーバーと直接通信する関数 ---
-def call_gemini_api(prompt, uploaded_file=None, is_multiple=False):
-    if "GEMINI_API_KEY" not in st.secrets:
-        st.error("Streamlitの管理画面（Secrets）に APIキーが設定されていません。")
-        st.stop()
+# --- Secretsからキーを読み込んで初期化 ---
+if "GEMINI_API_KEY" not in st.secrets:
+    st.error("Streamlitの管理画面（Secrets）に APIキーが設定されていません。")
+    st.stop()
+
+genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+
+# 【ここを修正】モデル名を最新の「gemini-3.5-flash」に変更しました！
+model = genai.GenerativeModel('gemini-3.5-flash')
+
+def call_gemini_with_lib(prompt, uploaded_files=None, is_multiple=False):
+    try:
+        contents = []
+        if uploaded_files:
+            if is_multiple:
+                for f in uploaded_files:
+                    img = Image.open(f)
+                    contents.append(img)
+            else:
+                img = Image.open(uploaded_files)
+                contents.append(img)
         
-    api_key = st.secrets["GEMINI_API_KEY"]
-    
-    # 【ここを完全修正】最新キーでも404エラーが出ないモデル指定に変更しました
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent"
-    
-    headers = {
-        "Content-Type": "application/json",
-        "x-goog-api-key": api_key
-    }
-    
-    contents = []
-    if uploaded_file:
-        if is_multiple:
-            for f in uploaded_file:
-                base64_image = base64.b64encode(f.read()).decode('utf-8')
-                f.seek(0)
-                contents.append({"inline_data": {"mime_type": f.type, "data": base64_image}})
-        else:
-            base64_image = base64.b64encode(uploaded_file.read()).decode('utf-8')
-            uploaded_file.seek(0)
-            contents.append({"inline_data": {"mime_type": uploaded_file.type, "data": base64_image}})
-            
-    contents.append({"text": prompt})
-    payload = {"contents": [{"parts": contents}]}
-    
-    response = requests.post(url, headers=headers, json=payload)
-    if response.status_code == 200:
-        return response.json()['candidates'][0]['content']['parts'][0]['text']
-    else:
-        raise Exception(f"Googleエラー ({response.status_code}): {response.text}")
+        contents.append(prompt)
+        response = model.generate_content(contents)
+        return response.text
+    except Exception as e:
+        raise Exception(f"Geminiエラー: {e}")
 
 # --- メインのUI構築 ---
 st.set_page_config(page_title="AI大学テスト対策", layout="wide")
@@ -86,14 +77,14 @@ with tab1:
             with st.spinner("Geminiが分析して類題を作成中..."):
                 try:
                     prompt = f"以下の画像を分析し、類似した問題を{num_q}問作成してください。必ず各問題の先頭に「【問題】」という文字をつけてください。解答や解説は含めず、問題文のみを出力してください。"
-                    res_text = call_gemini_api(prompt, uploaded_imgs, is_multiple=True)
+                    res_text = call_gemini_with_lib(prompt, uploaded_imgs, is_multiple=True)
                     
                     for block in res_text.split("【問題】"):
                         if block.strip():
                             st.session_state.questions.append("【問題】" + block.strip())
                     st.success("類題の生成が完了し、履歴に保存されました！")
                 except Exception as e:
-                    st.error(f"エラー: {e}")
+                    st.error(f"{e}")
         else:
             st.warning("画像をアップロードしてください。")
 
@@ -121,12 +112,12 @@ with tab2:
             with st.spinner("重要なキーワードと公式を抽出中..."):
                 try:
                     prompt = "画像に含まれる重要な公式や英単語、専門用語を抽出し、暗記カード形式で出力してください。「【用語/公式】: その説明や意味」という形式で1行ずつ箇条書きにしてください。"
-                    res_text = call_gemini_api(prompt, flash_imgs, is_multiple=True)
+                    res_text = call_gemini_with_lib(prompt, flash_imgs, is_multiple=True)
                     cards = [line.strip() for line in res_text.split('\n') if line.strip() and "】" in line]
                     st.session_state.flashcards.extend(cards if cards else [res_text])
                     st.success("暗記カードを作成しました！")
                 except Exception as e:
-                    st.error(f"エラー: {e}")
+                    st.error(f"{e}")
         else:
             st.warning("画像をアップロードしてください。")
     
@@ -160,11 +151,11 @@ with tab4:
             with st.spinner("採点中..."):
                 try:
                     prompt = "この画像の答案を採点し、100点満点で点数をつけてください。また、どこが間違っているか、どう直せばよいかの解説を丁寧に記述してください。"
-                    res = call_gemini_api(prompt, ans_img, is_multiple=False)
+                    res = call_gemini_with_lib(prompt, ans_img, is_multiple=False)
                     st.success("採点が完了しました！")
                     st.write(res)
                 except Exception as e:
-                    st.error(f"エラー: {e}")
+                    st.error(f"{e}")
         else:
             st.warning("答案の画像をアップロードしてください。")
 
@@ -179,11 +170,11 @@ with tab5:
                 with st.spinner("専用の特化問題を生成中..."):
                     try:
                         prompt = f"ユーザーの現在の弱点分野は「{', '.join(target)}」です。この弱点をピンポイントで克服するための特化型問題を1問作成し、その後に詳しい解説を記述してください。"
-                        w_q = call_gemini_api(prompt)
+                        w_q = call_gemini_with_lib(prompt)
                         st.success("生成完了！")
                         st.write(w_q)
                     except Exception as e:
-                        st.error(f"エラー: {e}")
+                        st.error(f"{e}")
             else:
                 st.warning("弱点を選択してください。")
     else:
