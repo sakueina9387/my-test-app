@@ -3,24 +3,106 @@ import google.generativeai as genai
 import json
 import os
 import random
+import pandas as pd
 from PIL import Image
+from streamlit_gsheets import GSheetsConnection
 
-# --- 設定・データ管理 ---
+# --- 設定・データ管理 (スプレッドシート連携) ---
 if "questions" not in st.session_state: st.session_state.questions = []
 if "flashcards" not in st.session_state: st.session_state.flashcards = []
 if "weaknesses" not in st.session_state: st.session_state.weaknesses = []
 if "subjects" not in st.session_state: st.session_state.subjects = ["デフォルト科目"]
 
-# --- Secretsからキーを読み込んで初期化 ---
-if "GEMINI_API_KEY" not in st.secrets:
-    st.error("Streamlitの管理画面（Secrets）に APIキーが設定されていません。")
+# Secretsの確認
+if "GEMINI_API_KEY" not in st.secrets or "SPREADSHEET_URL" not in st.secrets:
+    st.error("Streamlitの管理画面（Secrets）に GEMINI_API_KEY または SPREADSHEET_URL が設定されていません。")
     st.stop()
 
+# Geminiの初期化
 genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-
-# 【ここを修正】モデル名を最新の「gemini-3.5-flash」に変更しました！
 model = genai.GenerativeModel('gemini-3.5-flash')
 
+# スプレッドシートへの接続設定
+conn = st.connection("gsheets", type=GSheetsConnection, spreadsheet=st.secrets["SPREADSHEET_URL"])
+
+# 🔄 1. データ読み込み関数 (起動時や科目切り替え時に全データをスプレッドシートから読み込む)
+def load_all_data():
+    # --- 科目の読み込み (subjects シート) ---
+    try:
+        df_sub = conn.read(worksheet="subjects", ttl=0)
+        if not df_sub.empty and "subject" in df_sub.columns:
+            st.session_state.subjects = df_sub["subject"].dropna().tolist()
+            if not st.session_state.subjects:
+                st.session_state.subjects = ["デフォルト科目"]
+    except:
+        st.session_state.subjects = ["デフォルト科目"]
+
+    current_subj = st.session_state.get("selected_subject", "デフォルト科目")
+
+    # --- 類題と弱点タグの読み込み (questions シート) ---
+    try:
+        df_q = conn.read(worksheet="questions", ttl=0)
+        if not df_q.empty and "question" in df_q.columns:
+            df_filtered = df_q[df_q["subject"] == current_subj]
+            st.session_state.questions = df_filtered["question"].dropna().tolist()
+            if "weakness" in df_filtered.columns:
+                st.session_state.weaknesses = list(set(df_filtered["weakness"].dropna().tolist()))
+        else:
+            st.session_state.questions = []
+            st.session_state.weaknesses = []
+    except:
+        st.session_state.questions = []
+        st.session_state.weaknesses = []
+
+    # --- 暗記カードの読み込み (flashcards シート) ---
+    try:
+        df_f = conn.read(worksheet="flashcards", ttl=0)
+        if not df_f.empty and "front" in df_f.columns and "back" in df_f.columns:
+            df_filtered_f = df_f[df_f["subject"] == current_subj]
+            # 辞書のリスト形式 [{'front': '問題', 'back': '解答'}, ...] でsession_stateに保存
+            st.session_state.flashcards = df_filtered_f[["front", "back"]].dropna().to_dict(orient="records")
+        else:
+            st.session_state.flashcards = []
+    except:
+        st.session_state.flashcards = []
+
+
+# 💾 2. データ書き込み関数
+def save_subjects():
+    df = pd.DataFrame({"subject": st.session_state.subjects})
+    conn.update(worksheet="subjects", data=df)
+
+def save_new_question(subject, question_text, weakness_text=""):
+    try:
+        df_existing = conn.read(worksheet="questions", ttl=0)
+    except:
+        df_existing = pd.DataFrame(columns=["subject", "question", "weakness"])
+    new_data = pd.DataFrame([{"subject": subject, "question": question_text, "weakness": weakness_text}])
+    df_combined = pd.concat([df_existing, new_data], ignore_index=True)
+    conn.update(worksheet="questions", data=df_combined)
+
+def update_question_weakness(subject, question_text, new_weakness):
+    try:
+        df_existing = conn.read(worksheet="questions", ttl=0)
+        if not df_existing.empty:
+            mask = (df_existing["subject"] == subject) & (df_existing["question"] == question_text)
+            if mask.any():
+                df_existing.loc[mask, "weakness"] = new_weakness
+                conn.update(worksheet="questions", data=df_existing)
+    except Exception as e:
+        st.error(f"弱点保存エラー: {e}")
+
+def save_new_flashcard(subject, front, back):
+    try:
+        df_existing = conn.read(worksheet="flashcards", ttl=0)
+    except:
+        df_existing = pd.DataFrame(columns=["subject", "front", "back"])
+    new_data = pd.DataFrame([{"subject": subject, "front": front, "back": back}])
+    df_combined = pd.concat([df_existing, new_data], ignore_index=True)
+    conn.update(worksheet="flashcards", data=df_combined)
+
+
+# 🤖 3. Gemini通信関数
 def call_gemini_with_lib(prompt, uploaded_files=None, is_multiple=False):
     try:
         contents = []
@@ -32,20 +114,22 @@ def call_gemini_with_lib(prompt, uploaded_files=None, is_multiple=False):
             else:
                 img = Image.open(uploaded_files)
                 contents.append(img)
-        
         contents.append(prompt)
         response = model.generate_content(contents)
         return response.text
     except Exception as e:
         raise Exception(f"Geminiエラー: {e}")
 
-# --- メインのUI構築 ---
+
+# --- 🖥️ メインのUI構築 ---
 st.set_page_config(page_title="AI大学テスト対策", layout="wide")
 
-# ⚙️ 左サイドバー
-st.sidebar.header("⚙️ 設定・科目管理")
+if "data_loaded" not in st.session_state:
+    load_all_data()
+    st.session_state.data_loaded = True
 
-st.sidebar.subheader("👤 ユーザー設定")
+# ⚙️ 左サイドバー設定
+st.sidebar.header("⚙️ 設定・科目管理")
 current_user = st.sidebar.text_input("ユーザー名を入力", value="user1")
 
 st.sidebar.subheader("➕ 新しく科目を増やす")
@@ -53,20 +137,33 @@ new_subject = st.sidebar.text_input("科目の名前を入力")
 if st.sidebar.button("科目を追加登録"):
     if new_subject and new_subject not in st.session_state.subjects:
         st.session_state.subjects.append(new_subject)
+        save_subjects()
         st.sidebar.success(f"「{new_subject}」を追加しました！")
+        st.rerun()
 
 st.sidebar.subheader("📂 現在の対象科目")
-selected_subject = st.sidebar.selectbox("科目を選択してください", st.session_state.subjects)
+old_selected = st.session_state.get("selected_subject", "デフォルト科目")
+selected_subject = st.sidebar.selectbox(
+    "科目を選択してください", 
+    st.session_state.subjects, 
+    index=st.session_state.subjects.index(old_selected) if old_selected in st.session_state.subjects else 0
+)
 
-# 📂 メイン画面の表示
+if selected_subject != old_selected:
+    st.session_state.selected_subject = selected_subject
+    load_all_data()
+    st.rerun()
+
+st.session_state.selected_subject = selected_subject
+
+# メイン画面
 st.title(f"📚 {selected_subject} の学習ダッシュボード")
 
-# タブの作成
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🔥 過去問から類題", "📇 公式暗記カード", "⏱️ ミニ模試", "📝 答案を採点", "❌ 弱点克服モード"
 ])
 
-# --- 1. 類題生成 ---
+# --- 1. 類題生成 タブ ---
 with tab1:
     st.subheader("📷 過去問・レジュメから類題を作る")
     uploaded_imgs = st.file_uploader("問題画像 (複数可)", accept_multiple_files=True, type=["png", "jpg", "jpeg"], key="q_gen")
@@ -81,8 +178,11 @@ with tab1:
                     
                     for block in res_text.split("【問題】"):
                         if block.strip():
-                            st.session_state.questions.append("【問題】" + block.strip())
-                    st.success("類題の生成が完了し、履歴に保存されました！")
+                            q_text = "【問題】" + block.strip()
+                            st.session_state.questions.append(q_text)
+                            save_new_question(selected_subject, q_text)
+                    st.success("類題の生成が完了し、スプレッドシートに同期されました！")
+                    st.rerun()
                 except Exception as e:
                     st.error(f"{e}")
         else:
@@ -96,38 +196,80 @@ with tab1:
                 st.write(q)
                 col1, col2 = st.columns([3, 1])
                 with col1:
-                    weak_input = st.text_input("弱点タグ (例: 微分, 熱力学)", key=f"weak_{i}", label_visibility="collapsed", placeholder="弱点タグを追加...")
+                    weak_input = st.text_input("弱点タグ (例: 微分, 熱力学)", key=f"weak_{i}", placeholder="弱点タグを追加...", label_visibility="collapsed")
                 with col2:
                     if st.button("弱点を記録", key=f"btn_{i}"):
-                        if weak_input and weak_input not in st.session_state.weaknesses:
-                            st.session_state.weaknesses.append(weak_input)
-                            st.toast(f"弱点「{weak_input}」を記録しました！")
+                        if weak_input:
+                            update_question_weakness(selected_subject, q, weak_input)
+                            st.toast(f"弱点「{weak_input}」を登録しました！")
+                            load_all_data()
+                            st.rerun()
+                            
 
-# --- 2. 暗記カード ---
+# --- 2. 暗記カード タブ (1対1一問一答・スプレッドシート連動完全版) ---
 with tab2:
-    st.subheader("📇 画像から暗記カードを自動生成")
+    st.subheader("📇 画像から一問一答カードを自動生成")
     flash_imgs = st.file_uploader("公式やレジュメの画像", accept_multiple_files=True, type=["png", "jpg", "jpeg"], key="f_gen")
+    
     if st.button("カードを生成"):
         if flash_imgs:
-            with st.spinner("重要なキーワードと公式を抽出中..."):
+            with st.spinner("重要なキーワードと公式を一問一答形式で抽出中..."):
                 try:
-                    prompt = "画像に含まれる重要な公式や英単語、専門用語を抽出し、暗記カード形式で出力してください。「【用語/公式】: その説明や意味」という形式で1行ずつ箇条書きにしてください。"
+                    # 1対1形式にするためのシステム用プロンプト
+                    prompt = """
+                    画像から重要な用語、公式、定義、英単語などを抽出して「一問一答の暗記カード」にしてください。
+                    
+                    必ず以下のJSONフォーマットの配列で出力してください。他の文字は一切含めないでください。
+                    [
+                      {"front": "問題（例：〇〇の公式は？）", "back": "解答（例：E = mc^2）"},
+                      {"front": "問題2", "back": "解答2"}
+                    ]
+                    """
                     res_text = call_gemini_with_lib(prompt, flash_imgs, is_multiple=True)
-                    cards = [line.strip() for line in res_text.split('\n') if line.strip() and "】" in line]
-                    st.session_state.flashcards.extend(cards if cards else [res_text])
-                    st.success("暗記カードを作成しました！")
+                    
+                    # JSONのクリーニングと解析
+                    cleaned_json = res_text.strip()
+                    if cleaned_json.startswith("```json"):
+                        cleaned_json = cleaned_json.split("```json")[1].split("```")[0].strip()
+                    elif cleaned_json.startswith("```"):
+                        cleaned_json = cleaned_json.split("```")[1].split("```")[0].strip()
+                        
+                    new_cards = json.loads(cleaned_json)
+                    
+                    for card in new_cards:
+                        front = card.get("front", "").strip()
+                        back = card.get("back", "").strip()
+                        if front and back:
+                            save_new_flashcard(selected_subject, front, back) # スプレッドシートに保存
+                    
+                    st.success("一問一答暗記カードを作成し、スプレッドシートに同期しました！")
+                    load_all_data() # 最新データをロード
+                    st.rerun()
                 except Exception as e:
-                    st.error(f"{e}")
+                    st.error(f"カードの解析に失敗しました。もう一度お試しください。({e})")
         else:
             st.warning("画像をアップロードしてください。")
     
-    for c in st.session_state.flashcards:
-        st.info(c)
+    # --- 📇 暗記カードの画面表示 ---
+    if st.session_state.flashcards:
+        st.write("---")
+        st.subheader(f"📂 {selected_subject} の一問一答カード (タップで解答表示)")
+        
+        for idx, c in enumerate(st.session_state.flashcards):
+            # カード風のデザインで1対1表示
+            with st.container():
+                st.markdown(f"### 🎴 暗記カード {idx+1}")
+                st.info(f"**【問】** {c['front']}")
+                # アコーディオン（クリックして展開）で解答を表示
+                with st.expander("👉 解答を確認する"):
+                    st.success(f"**【答】** {c['back']}")
+                st.divider()
 
-# --- 3. ミニ模試 ---
+
+# --- 3. ミニ模試 タブ ---
 with tab3:
     st.subheader("⏱️ ミニ模試の作成")
-    st.write("保存されている類題の中から、ランダムで5〜7問を出題します。")
+    st.write("保存されている類題の中から、ランダムで5〜7問をテストとして出題します。")
     total_q = len(st.session_state.questions)
     
     if st.button("ミニ模試を出題する"):
@@ -140,9 +282,10 @@ with tab3:
                 st.write(q)
                 st.divider()
         else:
-            st.warning(f"現在履歴にある類題は {total_q} 問です。ミニ模試を作るには、タブ1で類題を5問以上生成してください。")
+            st.warning(f"現在、この科目の類題はスプレッドシートに {total_q} 問しかありません。ミニ模試を作るには、タブ1で類題を5問以上作成してください。")
 
-# --- 4. 答案採点 ---
+
+# --- 4. 答案採点 タブ ---
 with tab4:
     st.subheader("📝 AIによる答案採点")
     ans_img = st.file_uploader("自分の答案画像", type=["png", "jpg", "jpeg"], key="ans_grade")
@@ -159,10 +302,12 @@ with tab4:
         else:
             st.warning("答案の画像をアップロードしてください。")
 
-# --- 5. 弱点克服 ---
+
+# --- 5. 弱点克服 タブ ---
 with tab5:
     st.subheader("❌ 弱点克服モード")
     weak_list = list(set(st.session_state.weaknesses))
+    
     if weak_list:
         target = st.multiselect("克服したい弱点を選択", weak_list)
         if st.button("弱点特化の類題を生成"):
@@ -178,4 +323,4 @@ with tab5:
             else:
                 st.warning("弱点を選択してください。")
     else:
-        st.info("現在記録されている弱点はありません。タブ1の履歴から「弱点を記録」してください。")
+        st.info("現在この科目に登録されている弱点はありません。タブ1の履歴から「弱点を記録」してください。")
